@@ -1,0 +1,953 @@
+---
+title: "Final Project"
+author: "Team 3"
+---
+
+```{r install_packages, echo=FALSE, results="hide", message=FALSE, warning=FALSE}
+# Додатково, якщо не встановлені пакети
+#
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# install.packages("tibble")
+# install.packages("gt")
+# install.packages("Seurat")
+# install.packages("tidyverse")
+# install.packages("clustree")
+# install.packages("cluster")
+# install.packages("presto")
+# install.packages("plotly")
+# 
+# BiocManager::install("SingleCellExperiment")
+# BiocManager::install("scDblFinder")
+# BiocManager::install("scater")
+# BiocManager::install("clusterProfiler")
+# BiocManager::install("org.Hs.eg.db")
+```
+
+(Одразу активуємо бібліотеки для подальшої роботи.)
+
+```{r library, echo=TRUE, results="hide", message=FALSE, warning=FALSE}
+library(tibble)           # Робота з таблицями
+library(gt)               # Створення гарних таблиць
+library(Seurat)           # Основний пакет для аналізу scRNA-seq даних 
+library(tidyverse)        # Для роботи з даними
+library(SingleCellExperiment)  # Альтернативна структура даних для scRNA-seq
+library(scDblFinder)      # Для виявлення doublets
+library(scater)           # QC, нормалізація та візуалізація даних у SingleCellExperiment
+library(clustree)         # Візуалізація кластерних дерев при різних параметрах кластеризації
+library(cluster)          # Для обчислення silhouette scores
+library(clusterProfiler)  # GO аналіз
+library(org.Hs.eg.db)     # Анотаційна БД для людини.
+library(presto)           # Для швидкого диференційного аналізу 
+library(plotly)           # Інтерактивна графіка
+```
+
+## *Звідки брався датасет*
+
+**Article**: Single-cell transcriptomes of the human skin reveal age-related loss of fibroblast priming.
+
+**Authors**: Llorenç Solé-Boldo, Günter Raddatz, Sabrina Schütz, Jan-Philipp Mallm, Karsten Rippe, Anke S. Lonsdorf, Manuel Rodríguez-Paredes & Frank Lyko.
+
+**DOI**: https://doi.org/10.1038/s42003-020-0922-4
+
+## *Data availability*
+
+Набори даних scRNA-seq доступні в базі даних Gene Expression Omnibus (GEO) (номер доступу [**GSE130973**](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE130973)).
+
+## **Об'єкт дослідження**
+
+**~20,000 клітин** були отримані зі здорових зразків цілої шкіри відразу після резекції пахово-клубової області **п’яти чоловіків**: 2 "молодих" та 3 "старих" (**Table 1**).
+  
+Всі пацієнти пройшли повний огляд шкіри тіла дерматологом перед операцією, а медичні записи були переглянуті з особливою увагою до шкірних захворювань та/або супутніх захворювань шкіри. Не було зареєстровано жодних клінічних ознак чи історії запального чи системного захворювання шкіри. Крім того, жоден пацієнт не мав анамнезу УФ-терапії, не мав клінічних ознак гострого або хронічного актинічного пошкодження шкіри або не мав засмаглої шкіри (тобто шкіра - захищена від сонячного випромінювання) в пахово-клубовій області під час операції.
+
+**16 062** клітини пройшли етапи контролю якості, здійснені Cell Ranger. Щоб видалити можливі дублети клітин, були відфільтровані клітини з більш, ніж 7500 експресованими генами, а щоб видалити потенційні апоптотичні клітини,були відкинуті клітини з більш, ніж 5% мітохондріальних зчитувань. Застосування цих фільтрів призвело до остаточного набору даних із 15 457 одноклітинних транскриптомів.(**Table 1**).
+
+#### *Таблиця 1 з даними*. ####
+```{r Table_1, echo=FALSE, message=FALSE, warning=FALSE}
+Table_1 <- tribble(~"Sample ID", ~"Gender", ~"Age", ~"Skin type", ~"Reads per sample", ~"Numbers of cells", ~"Reads per cell", ~"Genes per cell",
+                   "Donor 1", "Male", 25, "Fair", 322091192, 2784, 102904, 1343, 
+                   "Donor 2", "Male", 27, "Fair", 338738780, 2670, 119737, 1111,
+                   "Donor 3", "Male", 53, "Fair", 359776321, 3324, 107976, 1718,
+                   "Donor 4", "Male", 70, "Fair", 378219220, 2144, 170215, 1388,
+                   "Donor 5", "Male", 69, "Fair", 370342531, 4535, 81411, 872)
+
+Table_1 |> gt() |> tab_header(
+    title = "Table 1. Overview of the samples used for single-cell RNA sequencing.",
+    subtitle = "The table shows biological features and sequencing statistics for the five samples.") |> fmt_number(columns = c("Reads per sample", "Reads per cell"), use_seps = TRUE, decimals = 0) |> 
+  cols_align(align =  "center", columns = everything())
+
+```
+
+## **БЛОК 1. Повна обробка та створення SeuratObject з нуля.**
+**Data**: використовуючи Seurat::Read10X(), було створено SeuratObject, який вже мав інтегровані датасети (2 Young + 3 Old).
+
+### Первинний QC - створюючи SeuratObject прибрали клітини, які експресують менше 200 генів, а також залишили тільки ті гени, які присутні хоча б у 3 клітинах.
+
+```{r seurat_object_data, echo=TRUE, results="hide", message=FALSE, warning=FALSE}
+data <- Read10X(data.dir = "D:/R/first_project/data")
+seurat_obj <- CreateSeuratObject(counts = data, project = "skin", min.cells = 3, min.features = 200)
+#Продивитись датасет:
+#str(seurat_obj) #структура Seurat
+#dim(seurat_obj) #розмір
+```
+
+### Pre QC на основі mitochondrial genes.
+
+```{r Pre_Quality_control, echo=FALSE, message=FALSE, warning=FALSE}
+
+seurat_obj[["percent.mt"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-")
+
+cat("Подивимось на VlnPlot до quality control.","\n")
+
+VlnPlot(seurat_obj, features = c("nFeature_RNA", "nCount_RNA","percent.mt"), ncol = 3, 
+        pt.size = 0.01, alpha = 0.05)
+
+cat("Також, подивимось на FeatureScatter до quality control.","\n")
+
+FeatureScatter(object = seurat_obj, feature1 = "nCount_RNA", feature2 = "percent.mt")
+
+FeatureScatter(object = seurat_obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+```
+
+```{r Pre_Quality_control_mt, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Наступний блок коду є необов'язковим, це, скоріш, демонстрація варіативності вибору.","\n")
+
+cat("Подивимось як впливає вибір відсотку мітохондріальних генів, що буде видалено, на якість та кількість клітин.","\n")
+
+seurat_objmt10 <- subset(seurat_obj, subset = percent.mt < 10) 
+seurat_objmt5 <- subset(seurat_obj, subset = percent.mt < 5) 
+
+cat("Подивимось на VlnPlot.","\n")
+
+cat("10mt","\n")
+VlnPlot(seurat_objmt10, features = "percent.mt", pt.size = 0.01, alpha = 0.5)
+cat("5mt","\n")
+VlnPlot(seurat_objmt5, features = "percent.mt", pt.size = 0.01, alpha = 0.5)
+
+cat("Додатково","\n")
+cat("Подивимось на FeatureScatter.","\n")
+cat("10mt","\n")
+FeatureScatter(object = seurat_objmt10, feature1 = "nCount_RNA", feature2 = "percent.mt")
+FeatureScatter(object = seurat_objmt10, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+cat("5mt","\n")
+FeatureScatter(object = seurat_objmt5, feature1 = "nCount_RNA", feature2 = "percent.mt")
+FeatureScatter(object = seurat_objmt5, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+
+mt10 <- dim(seurat_objmt10)
+mt5 <- dim(seurat_objmt5)
+cat("Кількість клітин в mt10:", mt10[2], "\n")
+
+cat("Кількість клітин в mt5:", mt5[2], "\n")
+
+cat("Різниця в кількості клітин:", mt10[2] - mt5[2], "\n")
+
+cat("Залишимо mt5.", "\n")
+
+rm(mt10, mt5,seurat_objmt10,seurat_objmt5)
+```
+
+### Проводимо QC, видаляючи всі об'єкти, що містять більше 5% мітохондріальних генів.
+
+```{r Quality_control_mt, echo=FALSE, message=FALSE, warning=FALSE}
+seurat_obj <- subset(seurat_obj, subset = percent.mt < 5) 
+
+cat("Подивимось на VlnPlot","\n")
+
+VlnPlot(seurat_obj, features = "percent.mt", pt.size = 0.01, alpha = 0.5)
+```
+
+### Проводимо QC, видаляючи всі об'єкти, що містять більше 4000 експресованих генів.
+
+```{r Quality_control_featureRNA, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Подивимось на VlnPlot до очистки","\n")
+
+VlnPlot(seurat_obj, features = "nFeature_RNA", pt.size = 0.01, alpha = 0.5)
+
+seurat_obj <- subset(seurat_obj, subset = nFeature_RNA < 4000)
+
+cat("Подивимось на VlnPlot після очистки (nFeature_RNA < 4000)","\n")
+
+VlnPlot(seurat_obj, features = "nFeature_RNA", pt.size = 0.01, alpha = 0.5)
+```
+
+### Проводимо нормалізацію+масштабування за допомогою загальної лінійної моделі (GLM)+Запускаємо аналіз головних компонент(PCA).
+
+```{r DefaultSeurat, echo=TRUE, message=FALSE, warning=FALSE}
+options(future.globals.maxSize = 1 * 1024^3)  # Задаю максимальний обсяг об’єктів, які можуть передаватися в паралельних процесах до 1 гігабайта (у мене було до 500 мб).
+seurat_obj <- SCTransform(seurat_obj, verbose = FALSE)
+seurat_obj <- RunPCA(seurat_obj, features = VariableFeatures(object = seurat_obj))
+```
+
+### Проводимо QC видаляючи даблети за допомогою пакету scDblFinder (стратегія полягає в симуляцію in silico дублетів із одноклітинних профілів експресії).
+
+```{r Quality_control_doublets, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Аби проаналізувати наші дані на наявність дублетів, треба використати пакет SingleCellExperiment")
+seurat_obj_with_doublets <- seurat_obj #копія на всякий випадок
+sce_obj <- as.SingleCellExperiment(seurat_obj) #Перетворюю SeuratObject у формат SingleCellExperiment для роботи з зазначеним пакетом
+top_genes <- VariableFeatures(seurat_obj)
+ncomp <- ncol(reducedDim(sce_obj, "PCA"))
+dbl_dens <- computeDoubletDensity(sce_obj, subset.row=top_genes, 
+    d=ncol(reducedDim(sce_obj)))
+
+#summary(dbl_dens) #базова статистика для DoubletScore
+sce_obj$DoubletScore <- dbl_dens
+
+cat("Створюємо UMAP-візуалізацію на основі PCA")
+
+sce_obj <- runUMAP(sce_obj, dimred = "PCA")
+
+plotUMAP(sce_obj, colour_by = "DoubletScore")
+
+cat("В додаток створимо TSNE-візуалізацію на основі PCA")
+
+sce_obj <- runTSNE(sce_obj, dimred = "PCA")
+
+plotTSNE(sce_obj, colour_by="DoubletScore")
+
+dbl_calls <- doubletThresholding(data.frame(score=dbl_dens),
+    method="griffiths", returnType="call")
+
+cat("Подивимось, скільки singlet, скільки doublet","\n")
+
+summary(dbl_calls)
+
+sce_obj$DoubletCall <- dbl_calls
+
+cat("Подивимось на plotColData, який показує розподіл DoubletScore між групами 'singlet' і 'doublet'","\n")
+
+plotColData(sce_obj, x = "DoubletCall", y = "DoubletScore", colour_by = "DoubletCall")
+
+# додаємо дані в наш SeuratObject
+seurat_obj_with_doublets$DoubletCall <- dbl_calls
+# робимо subset, щоб залишити "чистий" SeuratObject без doublets
+seurat_clean <- subset(seurat_obj_with_doublets, subset = DoubletCall == "singlet")
+
+old_ser_feature <- VlnPlot(seurat_obj, features = "nFeature_RNA", pt.size = 0.01, alpha = 0.1)
+new_ser_feature <- VlnPlot(seurat_clean, features = "nFeature_RNA", pt.size = 0.01, alpha = 0.1)
+old_ser_count <- VlnPlot(seurat_obj, features = "nCount_RNA", pt.size = 0.01, alpha = 0.1)
+new_ser_count <- VlnPlot(seurat_clean, features = "nCount_RNA", pt.size = 0.01, alpha = 0.1)
+
+cat("Порівняємо розподіли за nFeature_RNA та nCount_RNA до і після фільтрації (графік VlnPlot)","\n")
+
+(old_ser_feature | new_ser_feature)
+(old_ser_count | new_ser_count)
+```
+
+### Проводимо первинну кластеризацію, продивляючись можливі варіанти кластерів.
+
+```{r Pre_clustering, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Для цікавості подивимось на ElbowPlot.","\n")
+ElbowPlot(seurat_clean)
+
+cat("За рекомендацією одного з лекторів візьмемо 30 PC.","\n")
+
+seurat_clean <- FindNeighbors(seurat_clean, dims = 1:30)
+resolutions <- seq(from = 0.2, to = 1.2, by = 0.2) #різні резолюції кластеризації 
+                                                   #(від 0.2 до 1.2)
+invisible(capture.output({
+  seurat_clean <- suppressWarnings(suppressMessages(
+    FindClusters(seurat_clean, resolution = resolutions)
+  ))
+})) #щоб сховати output повідомлення з функції FindClusters()
+
+cat("Запускаємо RunUMAP.","\n")
+seurat_clean <- RunUMAP(seurat_clean, dims = 1:30)
+cat("seurat_clean <- RunUMAP(seurat_clean, dims = 1:30).","\n")
+```
+
+### Намалюємо дерево кластерів за допомогою clustree, щоб оцінити стабільність у різних роздільних здатностях.
+
+```{r clustree_for_resolution, echo=FALSE, message=FALSE, warning=FALSE}
+
+clustree(seurat_clean, prefix = "SCT_snn_res.")
+
+```
+
+### Обчислюємо silhouette scores для кожної роздільної здатності кластеризації.
+
+```{r silhouette_for_resolution, echo=FALSE, message=FALSE, warning=FALSE}
+
+pca_embeddings <- Embeddings(seurat_clean, reduction = "pca")
+dist_matrix <- dist(pca_embeddings)
+sil_scores <- sapply(resolutions, function(res) {
+  col_name <- paste0("SCT_snn_res.", res)
+  cluster_ids <- as.numeric(as.factor(seurat_clean@meta.data[[col_name]]))
+  if (length(unique(cluster_ids)) < 2) {
+    return(NA) 
+  }
+  sil <- silhouette(cluster_ids, dist_matrix)
+  if (is.null(dim(sil))) {
+    return(NA)
+  }
+  mean(sil[, "sil_width"])
+})
+
+sil_df <- data.frame(Resolution = resolutions, Avg_Silhouette = sil_scores)
+print(sil_df)
+
+cat("Вибираємо оптимальну resolution за графіком","\n")
+
+ggplot(sil_df, aes(x = Resolution, y = Avg_Silhouette)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "Average Silhouette Score Across Clustering Resolutions",
+       y = "Average Silhouette Width") +
+  scale_x_continuous(breaks = sil_df$Resolution)
+
+cat("0.4 or 0.8?","\n")
+cat("0.4!","\n")
+```
+
+### RunUMAP з resolution = 0.4 та dims = 1:30
+
+```{r RunUMAP_correct_resolution, echo=FALSE, message=FALSE, warning=FALSE}
+invisible(capture.output({
+  seurat_clean <- FindClusters(seurat_clean, resolution = 0.4)
+})) #щоб сховати output повідомлення з функції FindClusters()
+seurat_clean <- RunUMAP(seurat_clean, dims = 1:30)
+RunUMAP_correct_resolution <- DimPlot(seurat_clean, reduction = "umap")
+RunUMAP_correct_resolution
+
+#ggplotly(RunUMAP_correct_resolution) #додаткова інтерактивна візуалізація
+```
+
+### Анотуємо кластери на основі маркерних генів.
+
+```{r All_clusters_markers, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Дивимось кількість клітин у кожному кластері","\n")
+table(Idents(seurat_clean))
+
+markers <- FindAllMarkers(seurat_clean, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+top_markers <- markers |>
+  group_by(cluster) |>
+  top_n(n = 5, wt = avg_log2FC)
+
+# Окрема велика табличка, де гарно видно дані - для HTML 
+top_markers |> gt() |> 
+  tab_header(title = "Top Markers",
+             subtitle = "Marker genes for all clusters.")|> cols_align(align = "center", columns = everything())
+
+# Дані для визначення типів клітин у кожному кластері були отримані з наукових джерел.
+cluster_annotations <- c(
+  "Fibroblasts / Pericytes",           # 0
+  "T cells (general)",                 # 1
+  "Dendritic cells / Monocytes",       # 2
+  "Stressed / Mito-rich cells",        # 3
+  "Matrix fibroblasts",                # 4
+  "Endothelial cells (vascular)",      # 5
+  "Pericytes",                         # 6
+  "Immune-regulatory fibroblasts",     # 7
+  "Keratinocytes (differentiated)",    # 8
+  "Keratinocytes (activated)",         # 9
+  "Basal keratinocytes (stem-like)",   #10
+  "T cells (cytotoxic/memory)",        #11
+  "Macrophages (M2-like)",             #12
+  "Mast cells",                        #13
+  "Endothelial cells (~lymphatic)",    #14
+  "NK cells / CD8+ T cells",           #15
+  "Melanocytes",                       #16
+  "Neuroendocrine / Mesenchymal",      #17
+  "Erythroid cells",                   #18
+  "CD4+ T cells (~Th17)",              #19
+  "Smooth muscle cells",               #20
+  "Plasma B cells",                    #21
+  "Pre-B cells / immature B cells"     #22
+)
+
+top_markers <- top_markers |>
+  mutate(cell_type = cluster_annotations[as.numeric(as.character(cluster)) + 1])
+
+cluster_ids <- as.numeric(as.character(seurat_clean$seurat_clusters))
+seurat_clean$cell_type <- factor(cluster_annotations[cluster_ids + 1])
+seurat_clean <- RenameIdents(seurat_clean, setNames(cluster_annotations, 0:22))
+
+cat("UMAP з анотованими клітинами","\n")
+DimPlot(seurat_clean, reduction = "umap", label = TRUE, repel = TRUE, group.by = "ident", label.size = 3) +
+  ggtitle("Annotated cell types")
+
+cat("Додатково: DimPlot + NoLegend()")
+NoLegend_dimplot <- DimPlot(seurat_clean, reduction = "umap", label = TRUE, repel = TRUE, group.by = "ident", label.size = 3) + ggtitle("Annotated cell types") + NoLegend()
+NoLegend_dimplot
+```
+
+### Відокремлюємо fibroblasts окремо від інших типів клітин.
+
+```{r Only_fibroblast, echo=FALSE, message=FALSE, warning=FALSE}
+selected_clusters <- c(0, 4, 7, 17)
+subset_cells <- seurat_clean |> subset(seurat_clusters %in% selected_clusters)
+DimPlot(subset_cells, reduction = "umap", label = TRUE, repel = TRUE, group.by = "ident", label.size = 3) +
+  ggtitle("Selected fibroblast-related clusters")
+```
+
+### Проведемо аналіз GO!
+
+```{r Fibroblasts_Pericytes, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Fibroblasts / Pericytes","\n") 
+Idents(subset_cells) <- "cell_type"
+fibro_pericytes_markers <- FindMarkers(subset_cells, 
+                                       ident.1 = "Fibroblasts / Pericytes")
+
+fibro_pericytes_markers_df <- fibro_pericytes_markers |> 
+  as.data.frame() |> 
+  rownames_to_column(var = "gene")
+
+top_fibro_pericytes_markers <- fibro_pericytes_markers_df |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300) |>  
+  pull(gene)
+
+entrez_genes_fibro_pericytes <- bitr(top_fibro_pericytes_markers, fromType = "SYMBOL", 
+                                     toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+result_fibro_pericytes <- enrichGO(
+  gene = entrez_genes_fibro_pericytes$ENTREZID,  
+  OrgDb = org.Hs.eg.db,          
+  ont = "BP",                    
+  pAdjustMethod = "BH",          
+  pvalueCutoff = 0.05,           
+  qvalueCutoff = 0.2,            
+  readable = TRUE                
+)
+
+barplot(result_fibro_pericytes, showCategory = 10, title = "GO: Biological Process for Fibroblasts / Pericytes")
+
+top_fibro_pericytes_markers <- fibro_pericytes_markers_df |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300)
+
+marker_genes_fibro_pericytes <- top_fibro_pericytes_markers$gene[1:4]
+DotPlot(subset_cells, features = marker_genes_fibro_pericytes) + RotatedAxis()
+```
+
+```{r Matrix_fibroblasts, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Matrix fibroblasts","\n") 
+fibro_matrix_markers <- FindMarkers(subset_cells, 
+                                       ident.1 = "Matrix fibroblasts")
+
+fibro_matrix_markers_df <- fibro_matrix_markers |> 
+  as.data.frame() |> 
+  rownames_to_column(var = "gene")
+
+top_fibro_matrix_markers <- fibro_matrix_markers_df |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300) |>  
+  pull(gene)
+
+entrez_genes_matrix <- bitr(top_fibro_matrix_markers, fromType = "SYMBOL", 
+                                     toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+result_matrix <- enrichGO(
+  gene = entrez_genes_matrix$ENTREZID,  
+  OrgDb = org.Hs.eg.db,          
+  ont = "BP",                    
+  pAdjustMethod = "BH",          
+  pvalueCutoff = 0.05,           
+  qvalueCutoff = 0.2,            
+  readable = TRUE                
+)
+
+barplot(result_matrix, showCategory = 10, title = "GO: Biological Process for Matrix fibroblasts")
+
+top_fibro_matrix_markers <- fibro_matrix_markers_df |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300)
+
+marker_genes_matrix_markers <- top_fibro_matrix_markers$gene[1:4]
+DotPlot(subset_cells, features = marker_genes_matrix_markers) + RotatedAxis()
+```
+
+```{r Immune_regulatory_fibroblasts, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Immune-regulatory fibroblasts","\n") 
+fibro_immune_markers <- FindMarkers(subset_cells, 
+                                       ident.1 = "Immune-regulatory fibroblasts")
+
+fibro_immune_markers_df <- fibro_immune_markers |> 
+  as.data.frame() |> 
+  rownames_to_column(var = "gene")
+
+top_fibro_immune_markers <- fibro_immune_markers_df |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300) |>  
+  pull(gene)
+
+entrez_genes_immune_markers <- bitr(top_fibro_immune_markers, fromType = "SYMBOL", 
+                                     toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+result_fibro_pericytes <- enrichGO(
+  gene = entrez_genes_immune_markers$ENTREZID,  
+  OrgDb = org.Hs.eg.db,          
+  ont = "BP",                    
+  pAdjustMethod = "BH",          
+  pvalueCutoff = 0.05,           
+  qvalueCutoff = 0.2,            
+  readable = TRUE                
+)
+
+barplot(result_fibro_pericytes, showCategory = 10, title = "GO: Biological Process for Immune-regulatory fibroblasts")
+
+top_fibro_immune_markers <- fibro_immune_markers_df |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300)
+
+
+marker_genes_immune_markers <- top_fibro_immune_markers$gene[1:4]
+DotPlot(subset_cells, features = marker_genes_immune_markers) + RotatedAxis()
+```
+
+```{r Neuroendocrine_Mesenchymal, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Neuroendocrine / Mesenchymal","\n") 
+fibro_mesenchymal_markers <- FindMarkers(subset_cells, 
+                                       ident.1 = "Neuroendocrine / Mesenchymal")
+
+fibro_mesenchymal_markers_df <- fibro_mesenchymal_markers |> 
+  as.data.frame() |> 
+  rownames_to_column(var = "gene")
+
+top_fibro_mesenchymal_markers <- fibro_mesenchymal_markers_df |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300) |>  
+  pull(gene)
+
+entrez_genes_fibro_mesenchymal <- bitr(top_fibro_mesenchymal_markers, fromType = "SYMBOL", 
+                                     toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+result_fibro_mesenchymal <- enrichGO(
+  gene = entrez_genes_fibro_mesenchymal$ENTREZID,  
+  OrgDb = org.Hs.eg.db,          
+  ont = "BP",                    
+  pAdjustMethod = "BH",          
+  pvalueCutoff = 0.05,           
+  qvalueCutoff = 0.2,            
+  readable = TRUE                
+)
+
+barplot(result_fibro_mesenchymal, showCategory = 10, title = "GO: Biological Process for Neuroendocrine / Mesenchymal")
+
+top_fibro_mesenchymal_markers <- fibro_mesenchymal_markers_df |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300)
+
+
+marker_genes_mesenchymal_markers <- top_fibro_mesenchymal_markers$gene[1:4]
+DotPlot(subset_cells, features = marker_genes_mesenchymal_markers) + RotatedAxis()
+```
+
+## **БЛОК 2. Аналіз вже створеного SeuratObject зі статті.**
+**Data**: використовуючи Seurat::ReadRDS(), було прочитано SeuratObject. Об’єкт вже містив інтегровані датасети, а також інформацію про донорів (2 Young та 3 Old).
+
+```{r Seurat_article, echo=FALSE, message=FALSE, warning=FALSE}
+seurat_art <- readRDS("GSE130973_seurat_analysis_lyko.rds")
+
+cat("Продивимось, як виглядає цей SeuratObject","\n")
+head(seurat_art@meta.data)
+table(Idents(seurat_art))
+
+cat("Кількість кластерів","\n")
+Idents(seurat_art) <- "integrated_snn_res.0.4"
+levels(Idents(seurat_art))
+
+cat("Видаляємо всі інтеграційні результати — залишаємо тільки raw RNA-дані, щоб почати обробку з нуля.")
+seurat_art[["integrated"]] <- NULL
+seurat_art[["pca"]] <- NULL
+seurat_art[["neighbors"]] <- NULL
+seurat_art[["reductions"]] <- NULL
+```
+
+### Проводимо стандартний протокол для нового-старого Seurat!
+
+```{r New_Seurat_article, echo=TRUE, message=FALSE, warning=FALSE}
+rna_obj_clean <- CreateSeuratObject(counts = seurat_art[["RNA"]]@counts)
+rna_obj_clean <- NormalizeData(rna_obj_clean)
+rna_obj_clean <- FindVariableFeatures(rna_obj_clean)
+rna_obj_clean <- ScaleData(rna_obj_clean)
+rna_obj_clean <- RunPCA(rna_obj_clean)
+rna_obj_clean <- FindNeighbors(rna_obj_clean)
+rna_obj_clean <- FindClusters(rna_obj_clean, resolution = 0.5)
+rna_obj_clean <- RunUMAP(rna_obj_clean, dims = 1:20)
+#resolutions та dims - були взяті відповідно до статті.
+```
+
+### UMAP!
+
+```{r New_Seurat_article_DimPlot, echo=FALSE, message=FALSE, warning=FALSE}
+DimPlot(rna_obj_clean, reduction = "umap")
+```
+
+### UMAP з анотаціями клітин.
+
+```{r DimPlot_ann,echo=FALSE, message=FALSE, warning=FALSE}
+top_markers_100 <- markers |>
+  group_by(cluster) |>
+  top_n(n = 100, wt = avg_log2FC)
+
+top_markers_100 <- top_markers_100 |>
+  mutate(cell_type = cluster_annotations[as.numeric(as.character(cluster)) + 1])
+
+new_markers <- FindAllMarkers(rna_obj_clean, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+new_top <- new_markers |>
+  group_by(cluster) |>
+  slice_max(order_by = avg_log2FC, n = 100) |> 
+  summarise(top_genes = list(gene), .groups = "drop")
+
+# new_table <- new_top |>
+#   mutate(genes_string = sapply(top_genes, paste, collapse = ", ")) |> 
+#   select(cluster, genes_string)
+# new_table
+
+reference_top <- top_markers_100 |> 
+  group_by(cluster, cell_type) |>
+  summarise(ref_genes = list(gene), .groups = "drop")
+
+
+matched_annotations <- lapply(new_top$top_genes, function(glist) {
+  ref_hits <- reference_top |>
+    rowwise() |>
+    mutate(overlap = length(intersect(glist, ref_genes))) |>
+    arrange(desc(overlap)) |>
+    slice(1)
+  return(ref_hits$cell_type)
+})
+
+
+new_cluster_ids <- as.numeric(as.character(rna_obj_clean$seurat_clusters))
+rna_obj_clean$cell_type <- factor(unlist(matched_annotations)[new_cluster_ids + 1])
+
+rna_obj_clean <- RenameIdents(rna_obj_clean, setNames(unlist(matched_annotations), levels(rna_obj_clean)))
+
+DimPlot(rna_obj_clean, reduction = "umap",label = TRUE, repel = TRUE, group.by = "cell_type", label.size = 3) + ggtitle("UMAP з анотаціями клітин")
+
+```
+
+### UMAP фібробластних субтипів.
+
+```{r Fibroblasts_ann, echo=FALSE, message=FALSE, warning=FALSE}
+fibro_labels_new <- c(
+  "Fibroblasts / Pericytes",
+  "Matrix fibroblasts",
+  "Immune-regulatory fibroblasts",
+  "Neuroendocrine / Mesenchymal"
+)
+fibro_subset_new <- subset(rna_obj_clean, subset = cell_type %in% fibro_labels_new)
+DimPlot(fibro_subset_new, reduction = "umap", label = TRUE, repel = TRUE, group.by = "cell_type", label.size = 3) +
+  ggtitle("Фібробластні субтипи")
+```
+
+### Диференційний аналіз експресії між віковими групами (OLD vs YOUNG).
+
+```{r seurat_art_Age, echo=FALSE, message=FALSE, warning=FALSE}
+rna_obj_clean$age <- seurat_art$age
+cat("Глянемо, як розподілені клітини за Age", "\n")
+table(rna_obj_clean$age)
+```
+
+### Fibroblasts / Pericytes
+
+```{r Per_Age, echo=FALSE, message=FALSE, warning=FALSE}
+fibro_Per <- subset(fibro_subset_new, subset = cell_type == "Fibroblasts / Pericytes")
+fibro_Per$age <- rna_obj_clean$age[Cells(fibro_Per)]
+Idents(fibro_Per) <- "age"
+
+markers_Per <- FindMarkers(fibro_Per, ident.1 = "OLD", ident.2 = "YOUNG", logfc.threshold = 0.25)
+top_genes_Per <- head(rownames(markers_Per[order(markers_Per$p_val_adj), ]), 5)
+
+DotPlot(fibro_Per, features = top_genes_Per, group.by = "age") +
+  RotatedAxis() +
+  theme_minimal() +
+  ggtitle("Top 5: OLD vs YOUNG – Fibroblasts / Pericytes")
+```
+
+### Matrix fibroblasts
+
+```{r Mat_Age, echo=FALSE, message=FALSE, warning=FALSE}
+fibroMat <- subset(fibro_subset_new, subset = cell_type == "Matrix fibroblasts")
+fibroMat$age <- rna_obj_clean$age[Cells(fibroMat)]
+Idents(fibroMat) <- "age"
+
+Mat <- FindMarkers(fibroMat, ident.1 = "OLD", ident.2 = "YOUNG", logfc.threshold = 0.25)
+top_genesMat <- head(rownames(Mat[order(Mat$p_val_adj), ]), 5)
+
+DotPlot(fibroMat, features = top_genesMat, group.by = "age") +
+  RotatedAxis() +
+  theme_minimal() +
+  ggtitle("Top 5: OLD vs YOUNG – Matrix fibroblasts")
+```
+
+### Immune-regulatory fibroblasts
+
+```{r Immune_Age, echo=FALSE, message=FALSE, warning=FALSE}
+fibroImmune <- subset(fibro_subset_new, subset = cell_type == "Immune-regulatory fibroblasts")
+fibroImmune$age <- rna_obj_clean$age[Cells(fibroImmune)]
+Idents(fibroImmune) <- "age"
+
+Immune <- FindMarkers(fibroImmune, ident.1 = "OLD", ident.2 = "YOUNG", logfc.threshold = 0.25)
+top_genesImmune <- head(rownames(Immune[order(Immune$p_val_adj), ]), 5)
+
+DotPlot(fibroImmune, features = top_genesImmune, group.by = "age") +
+  RotatedAxis() +
+  theme_minimal() +
+  ggtitle("Top 5: OLD vs YOUNG – Immune-regulatory fibroblasts")
+```
+
+### Neuroendocrine / Mesenchymal
+
+```{r Mes_Age, echo=FALSE, message=FALSE, warning=FALSE}
+fibroMes <- subset(fibro_subset_new, subset = cell_type == "Neuroendocrine / Mesenchymal")
+fibroMes$age <- rna_obj_clean$age[Cells(fibroMes)]
+Idents(fibroMes) <- "age"
+
+Mes <- FindMarkers(fibroMes, ident.1 = "OLD", ident.2 = "YOUNG", logfc.threshold = 0.25)
+top_genesMes <- head(rownames(Mes[order(Mes$p_val_adj), ]), 5)
+
+DotPlot(fibroMes, features = top_genesMes, group.by = "age") +
+  RotatedAxis() +
+  theme_minimal() +
+  ggtitle("Top 5: OLD vs YOUNG – Neuroendocrine / Mesenchymal")
+```
+
+ДОДАТКОВА ІНФОРМАЦІЯ
+### Проведемо аналіз GO і в датасеті rna_obj_clean!
+
+```{r Fibroblasts_Pericytes_NEW, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Fibroblasts / Pericytes NEW","\n") 
+fibro_pericytes_markersNEW <- FindMarkers(fibro_subset_new, 
+                                       ident.1 = "Fibroblasts / Pericytes")
+
+fibro_pericytes_markers_dfNEW <- fibro_pericytes_markersNEW |> 
+  as.data.frame() |> 
+  rownames_to_column(var = "gene")
+
+top_fibro_pericytes_markersNEW <- fibro_pericytes_markers_dfNEW |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300) |>  
+  pull(gene)
+
+entrez_genes_fibro_pericytesNEW <- bitr(top_fibro_pericytes_markersNEW, fromType = "SYMBOL", 
+                                     toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+result_fibro_pericytesNEW <- enrichGO(
+  gene = entrez_genes_fibro_pericytesNEW$ENTREZID,  
+  OrgDb = org.Hs.eg.db,          
+  ont = "BP",                    
+  pAdjustMethod = "BH",          
+  pvalueCutoff = 0.05,           
+  qvalueCutoff = 0.2,            
+  readable = TRUE                
+)
+
+barplot(result_fibro_pericytesNEW, showCategory = 10, title = "GO: Biological Process for Fibroblasts / Pericytes NEW")
+
+top_fibro_pericytes_markersNEW <- fibro_pericytes_markers_dfNEW |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300)
+
+marker_genes_fibro_pericytesNEW <- top_fibro_pericytes_markersNEW$gene[1:4]
+DotPlot(fibro_subset_new, features = marker_genes_fibro_pericytesNEW) + RotatedAxis()
+
+```
+
+```{r Matrix_fibroblasts_NEW, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Matrix fibroblasts NEW","\n") 
+fibro_matrix_markersNEW <- FindMarkers(fibro_subset_new, 
+                                       ident.1 = "Matrix fibroblasts")
+
+fibro_matrix_markers_dfNEW <- fibro_matrix_markersNEW |> 
+  as.data.frame() |> 
+  rownames_to_column(var = "gene")
+
+top_fibro_matrix_markersNEW <- fibro_matrix_markers_dfNEW |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300) |>  
+  pull(gene)
+
+entrez_genes_matrixNEW <- bitr(top_fibro_matrix_markersNEW, fromType = "SYMBOL", 
+                                     toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+result_matrixNEW <- enrichGO(
+  gene = entrez_genes_matrixNEW$ENTREZID,  
+  OrgDb = org.Hs.eg.db,          
+  ont = "BP",                    
+  pAdjustMethod = "BH",          
+  pvalueCutoff = 0.05,           
+  qvalueCutoff = 0.2,            
+  readable = TRUE                
+)
+
+barplot(result_matrixNEW, showCategory = 10, title = "GO: Biological Process for Matrix fibroblasts NEW")
+
+top_fibro_matrix_markersNEW <- fibro_matrix_markers_dfNEW |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300)
+
+marker_genes_matrix_markersNEW <- top_fibro_matrix_markersNEW$gene[1:4]
+DotPlot(fibro_subset_new, features = marker_genes_matrix_markersNEW) + RotatedAxis()
+
+```
+
+```{r Immune_regulatory_fibroblasts_NEW, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Immune-regulatory fibroblasts NEW","\n") 
+fibro_immune_markersNEW <- FindMarkers(fibro_subset_new, 
+                                       ident.1 = "Immune-regulatory fibroblasts")
+
+fibro_immune_markers_dfNEW <- fibro_immune_markersNEW |> 
+  as.data.frame() |> 
+  rownames_to_column(var = "gene")
+
+top_fibro_immune_markersNEW <- fibro_immune_markers_dfNEW |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300) |>  
+  pull(gene)
+
+entrez_genes_immune_markersNEW <- bitr(top_fibro_immune_markersNEW, fromType = "SYMBOL", 
+                                     toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+result_fibro_pericytesNEW <- enrichGO(
+  gene = entrez_genes_immune_markersNEW$ENTREZID,  
+  OrgDb = org.Hs.eg.db,          
+  ont = "BP",                    
+  pAdjustMethod = "BH",          
+  pvalueCutoff = 0.05,           
+  qvalueCutoff = 0.2,            
+  readable = TRUE                
+)
+
+barplot(result_fibro_pericytesNEW, showCategory = 10, title = "GO: Biological Process for Immune-regulatory fibroblasts NEW")
+
+top_fibro_immune_markersNEW <- fibro_immune_markers_dfNEW |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300)
+
+
+marker_genes_immune_markersNEW <- top_fibro_immune_markersNEW$gene[1:4]
+DotPlot(fibro_subset_new, features = marker_genes_immune_markersNEW) + RotatedAxis()
+
+```
+
+```{r Neuroendocrine_Mesenchymal_NEW, echo=FALSE, message=FALSE, warning=FALSE}
+cat("Neuroendocrine / Mesenchymal NEW","\n") 
+fibro_mesenchymal_markersNEW <- FindMarkers(fibro_subset_new, 
+                                       ident.1 = "Neuroendocrine / Mesenchymal")
+
+fibro_mesenchymal_markers_dfNEW <- fibro_mesenchymal_markersNEW |> 
+  as.data.frame() |> 
+  rownames_to_column(var = "gene")
+
+top_fibro_mesenchymal_markersNEW <- fibro_mesenchymal_markers_dfNEW |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300) |>  
+  pull(gene)
+
+entrez_genes_fibro_mesenchymalNEW <- bitr(top_fibro_mesenchymal_markersNEW, fromType = "SYMBOL", 
+                                     toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+result_fibro_mesenchymalNEW <- enrichGO(
+  gene = entrez_genes_fibro_mesenchymalNEW$ENTREZID,  
+  OrgDb = org.Hs.eg.db,          
+  ont = "BP",                    
+  pAdjustMethod = "BH",          
+  pvalueCutoff = 0.05,           
+  qvalueCutoff = 0.2,            
+  readable = TRUE                
+)
+
+barplot(result_fibro_mesenchymalNEW, showCategory = 10, title = "GO: Biological Process for Neuroendocrine / Mesenchymal NEW")
+
+
+top_fibro_mesenchymal_markersNEW <- fibro_mesenchymal_markers_dfNEW |>
+  filter(p_val_adj < 0.05, avg_log2FC > 0.25) |>
+  slice_max(order_by = avg_log2FC, n = 300)
+
+
+marker_genes_mesenchymal_markersNEW <- top_fibro_mesenchymal_markersNEW$gene[1:4]
+DotPlot(fibro_subset_new, features = marker_genes_mesenchymal_markersNEW) + RotatedAxis()
+```
+
+
+--------------------------------------------------------------------------------
+```{r Just_an_additional_function, echo=FALSE, message=FALSE, warning=FALSE}
+# 
+# # шукає гени з різною експресією між OLD і YOUNG
+# markers_cluster0 <- FindMarkers(rna_obj_clean, ident.1 = "OLD", ident.2 = "YOUNG")
+# 
+# # Автоматичне порівняння OLD vs YOUNG у кожному кластері.
+# 
+# compare_age_by_cluster <- function(seurat_art, cluster_col = "seurat_clusters", age_col = "age") {
+#   if (!(cluster_col %in% colnames(seurat_art@meta.data))) {
+#     stop(paste("В meta.data нема стовпця", cluster_col))
+#   }
+#   if (!(age_col %in% colnames(seurat_art@meta.data))) {
+#     stop(paste("В meta.data нема стовпця", age_col))
+#   }
+#   
+#   Idents(seurat_art) <- seurat_art[[cluster_col]][,1]
+#   cluster_ids <- levels(Idents(seurat_art))
+#   age_markers_list <- list()
+#   
+#   for (cluster_id in cluster_ids) {
+#     message(paste("Кластер", cluster_id))
+#     
+#     cells_in_cluster <- WhichCells(seurat_art, idents = cluster_id)
+#     cluster_obj <- subset(seurat_art, cells = cells_in_cluster)
+#     
+#     cluster_obj$age <- seurat_art$age[Cells(cluster_obj)]
+#     
+#     if (length(unique(cluster_obj$age)) == 2 && all(c("OLD", "YOUNG") %in% cluster_obj$age)) {
+#       Idents(cluster_obj) <- cluster_obj$age
+#       markers <- FindMarkers(cluster_obj, ident.1 = "OLD", ident.2 = "YOUNG", logfc.threshold = 0.25)
+#       age_markers_list[[paste0("cluster_", cluster_id)]] <- markers
+#     } else {
+#       message(paste("Пропускаємо кластер", cluster_id, "- немає обох груп"))
+#     }
+#   }
+#   
+#   return(age_markers_list)
+# }
+# 
+# 
+# results_by_cluster <- compare_age_by_cluster(rna_obj_clean)
+# 
+# # Об’єднання всіх результатів у загальну таблицю
+# all_markers <- bind_rows(
+#   lapply(names(results_by_cluster), function(cluster) {
+#     df <- results_by_cluster[[cluster]]
+#     df$cluster <- cluster
+#     df$gene <- rownames(df)
+#     return(df)
+#   })
+# )
+# 
+# df <- results_by_cluster[["cluster_0"]]
+# df$gene <- rownames(df)
+# 
+# #Збереження генів з диференційованою експресією для кожного кластеру в Excel.
+# 
+# # wb <- createWorkbook()
+# # 
+# # for (cluster_name in names(results_by_cluster)) {
+# #      df <- results_by_cluster[[cluster_name]]
+# #      df$gene <- rownames(df)
+# #      addWorksheet(wb, sheetName = cluster_name)
+# #      writeData(wb, sheet = cluster_name, df)
+# #  }
+# # 
+# # saveWorkbook(wb, "clusters_OLD_vs_YOUNG.xlsx", overwrite = TRUE)
+# 
+# # DotPlot по вікових групах для топ-генів
+# 
+# top_genes <- unique(unlist(lapply(results_by_cluster, function(df) {
+#   head(rownames(df[order(df$p_val_adj), ]), 3)
+# })))
+# 
+# Idents(rna_obj_clean) <- "age"
+# 
+# DotPlot(rna_obj_clean, features = top_genes, group.by = "age") +
+#   RotatedAxis() +
+#   theme_minimal() +
+#   ggtitle("Топ DE-гени за віком (OLD vs YOUNG)")
+```
+
